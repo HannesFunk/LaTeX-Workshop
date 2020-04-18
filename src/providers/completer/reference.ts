@@ -103,7 +103,7 @@ export class Reference {
         const useLabelKeyVal = configuration.get('intellisense.label.keyval')
         const refs: vscode.CompletionItem[] = []
         let label = ''
-        if (latexParser.isCommand(node) && node.name === 'label') {
+        if (latexParser.isCommand(node) && node.name === 'label' && node.args.length > 0) {
             // \label{some-text}
             label = (node.args.filter(latexParser.isGroup)[0].content[0] as latexParser.TextString).content
         } else if (latexParser.isTextString(node) && node.content === 'label=' && useLabelKeyVal && nextNode !== undefined) {
@@ -124,6 +124,9 @@ export class Reference {
         }
         if (latexParser.hasContentArray(node)) {
             return this.getRefFromNodeArray(node.content, lines)
+        }
+        if (latexParser.hasArgsArray(node)) {
+            return this.getRefFromNodeArray(node.args, lines)
         }
         return refs
     }
@@ -176,6 +179,10 @@ export class Reference {
             const result = newLabelReg.exec(auxContent)
             if (result === null) {
                 break
+            }
+            if (result[1].endsWith('@cref') && result[1].replace('@cref', '') in this.prevIndexObj) {
+                // Drop extra \newlabel entries added by cleveref
+                continue
             }
             this.prevIndexObj[result[1]] = {refNumber: result[2], pageNumber: result[3]}
             if (result[1] in this.suggestions) {

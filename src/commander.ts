@@ -1,15 +1,21 @@
 import * as vscode from 'vscode'
 import * as fs from 'fs-extra'
 import * as path from 'path'
-import {bibtexParser} from 'latex-utensils'
 
 import {Extension} from './main'
 import {getLongestBalancedString} from './utils/utils'
-import * as bibtexUtils from './utils/bibtexutils'
 import {TeXDoc} from './components/texdoc'
-import {performance} from 'perf_hooks'
 
 async function quickPickRootFile(rootFile: string, localRootFile: string): Promise<string | undefined> {
+    const configuration = vscode.workspace.getConfiguration('latex-workshop')
+    const doNotPrompt = configuration.get('latex.rootFile.doNotPrompt') as boolean
+    if (doNotPrompt) {
+        if (configuration.get('latex.rootFile.useSubFile')) {
+            return localRootFile
+        } else {
+            return rootFile
+        }
+    }
     const pickedRootFile = await vscode.window.showQuickPick([{
         label: 'Default root file',
         description: `Path: ${rootFile}`
@@ -59,7 +65,7 @@ export class Commander {
             .catch(err => this.extension.logger.addLogMessage(`Error reading data: ${err}.`))
     }
 
-    async build(skipSelection: boolean = false, rootFile: string | undefined = undefined, recipe: string | undefined = undefined) {
+    async build(skipSelection: boolean = false, rootFile: string | undefined = undefined, languageId: string | undefined = undefined, recipe: string | undefined = undefined) {
         this.extension.logger.addLogMessage('BUILD command invoked.')
         if (!vscode.window.activeTextEditor) {
             return
@@ -70,13 +76,14 @@ export class Commander {
         const externalBuildArgs = configuration.get('latex.external.build.args') as string[]
         if (rootFile === undefined && this.extension.manager.hasTexId(vscode.window.activeTextEditor.document.languageId)) {
             rootFile = await this.extension.manager.findRoot()
+            languageId = this.extension.manager.rootFileLanguageId
         }
         if (externalBuildCommand) {
             const pwd = path.dirname(rootFile ? rootFile : vscode.window.activeTextEditor.document.fileName)
             await this.extension.builder.buildWithExternalCommand(externalBuildCommand, externalBuildArgs, pwd, rootFile)
             return
         }
-        if (rootFile === undefined) {
+        if (rootFile === undefined || languageId === undefined) {
             this.extension.logger.addLogMessage('Cannot find LaTeX root file.')
             return
         }
@@ -89,7 +96,7 @@ export class Commander {
             }
         }
         this.extension.logger.addLogMessage(`Building root file: ${pickedRootFile}`)
-        await this.extension.builder.build(pickedRootFile, recipe)
+        await this.extension.builder.build(pickedRootFile, languageId, recipe)
     }
 
     async revealOutputDir() {
@@ -114,7 +121,7 @@ export class Commander {
             return
         }
         if (recipe) {
-            this.build(false, undefined, recipe)
+            this.build(false, undefined, undefined, recipe)
             return
         }
         vscode.window.showQuickPick(recipes.map(candidate => candidate.name), {
@@ -123,7 +130,7 @@ export class Commander {
             if (!selected) {
                 return
             }
-            this.build(false, undefined, selected)
+            this.build(false, undefined, undefined, selected)
         })
     }
 
@@ -579,20 +586,21 @@ export class Commander {
 
         function replacer(
             _match: string,
-            sectionName: keyof typeof promotes ,
-            options: string,
+            sectionName: keyof typeof promotes,
+            asterisk: string | undefined,
+            options: string | undefined,
             contents: string
         ) {
             if (change === 'promote') {
-                return '\\' + promotes[sectionName] + (options ? options : '') + contents
+                return '\\' + promotes[sectionName] + (asterisk ?? '') + (options ?? '') + contents
             } else {
                 // if (change === 'demote')
-                return '\\' + demotes[sectionName] + (options ? options : '') + contents
+                return '\\' + demotes[sectionName] + (asterisk ?? '') + (options ?? '') + contents
             }
         }
 
         // when supported, negative lookbehind at start would be nice --- (?<!\\)
-        const pattern = /\\(part|chapter|section|subsection|subsection|subsubsection|paragraph|subparagraph)(\[.+?\])?(\{.*?\})/g
+        const pattern = /\\(part|chapter|section|subsection|subsection|subsubsection|paragraph|subparagraph)(\*)?(\[.+?\])?(\{.*?\})/g
 
         function getLastLineLength(someText: string) {
             const lines = someText.split(/\n/)
@@ -607,7 +615,7 @@ export class Commander {
 
         for (let selection of selections) {
             let mode: 'selection' | 'cursor' = 'selection'
-            let oldSelection: any = null
+            let oldSelection: vscode.Selection | null = null
             if (selection.isEmpty) {
                 mode = 'cursor'
                 oldSelection = selection
@@ -628,7 +636,7 @@ export class Commander {
                         )
                     )
                 )
-            } else { // mode === 'cursor'
+            } else if (oldSelection) { // mode === 'cursor'
                 const anchorPosition = oldSelection.anchor.character + changeInEndCharacterPosition
                 const activePosition = oldSelection.active.character + changeInEndCharacterPosition
                 newSelections.push(
@@ -668,74 +676,6 @@ export class Commander {
         }
         const ast = await this.extension.pegParser.parseBibtex(vscode.window.activeTextEditor.document.getText())
         vscode.workspace.openTextDocument({content: JSON.stringify(ast, null, 2), language: 'json'}).then(doc => vscode.window.showTextDocument(doc))
-    }
-
-    async bibtexFormat(sort: boolean, align: boolean) {
-        if (vscode.window.activeTextEditor === undefined || vscode.window.activeTextEditor.document.languageId !== 'bibtex') {
-            return
-        }
-        const t0 = performance.now() // Measure performance
-        const ast = await this.extension.pegParser.parseBibtex(vscode.window.activeTextEditor.document.getText())
-
-        const config = vscode.workspace.getConfiguration('latex-workshop')
-        const leftright = config.get('bibtex-format.surround') === 'Curly braces' ? [ '{', '}' ] : [ '"', '"']
-        const tabs = { '2 spaces': '  ', '4 spaces': '    ', 'tab': '\t' }
-        const configuration: bibtexUtils.BibtexFormatConfig = {
-            tab: tabs[config.get('bibtex-format.tab') as ('2 spaces' | '4 spaces' | 'tab')],
-            case: config.get('bibtex-format.case') as ('UPPERCASE' | 'lowercase'),
-            left: leftright[0],
-            right: leftright[1],
-            sort: config.get('bibtex-format.sortby') as string[]
-        }
-
-        const entries: bibtexParser.Entry[] = []
-        const entryLocations: vscode.Range[] = []
-        ast.content.forEach(item => {
-            if (bibtexParser.isEntry(item)) {
-                entries.push(item)
-                // latex-utilities uses 1-based locations whereas VSCode uses 0-based
-                entryLocations.push(new vscode.Range(
-                    item.location.start.line - 1,
-                    item.location.start.column - 1,
-                    item.location.end.line - 1,
-                    item.location.end.column - 1))
-            }
-        })
-
-        let sortedEntryLocations: vscode.Range[] = []
-        if (sort) {
-            entries.sort(bibtexUtils.bibtexSort(configuration.sort)).forEach(entry => {
-                sortedEntryLocations.push((new vscode.Range(
-                    entry.location.start.line - 1,
-                    entry.location.start.column - 1,
-                    entry.location.end.line - 1,
-                    entry.location.end.column - 1)))
-            })
-        } else {
-            sortedEntryLocations = entryLocations
-        }
-
-        // Successively replace the text in the current location from the sorted location
-        const edit = new vscode.WorkspaceEdit()
-        const uri = vscode.window.activeTextEditor.document.uri
-        let text: string
-        for (let i = 0; i < entries.length; i++) {
-            if (align) {
-                text = bibtexUtils.bibtexFormat(entries[i], configuration)
-            } else {
-                text = vscode.window.activeTextEditor.document.getText(sortedEntryLocations[i])
-            }
-            edit.replace(uri, entryLocations[i], text)
-        }
-
-        vscode.workspace.applyEdit(edit).then(success => {
-            if (success) {
-                const t1 = performance.now()
-                this.extension.logger.addLogMessage(`BibTeX action successful. Took ${t1 - t0} ms.`)
-            } else {
-                this.extension.logger.showErrorMessage('Something went wrong while processing the bibliography.')
-            }
-        })
     }
 
     texdoc(pkg?: string) {

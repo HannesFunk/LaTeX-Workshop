@@ -3,8 +3,9 @@ import * as fs from 'fs-extra'
 import {latexParser} from 'latex-utensils'
 
 import {Extension} from '../../main'
+import {Environment, EnvSnippetType} from './environment'
 
-interface DataItemEntry {
+interface CmdItemEntry {
     command: string, // frame
     snippet: string,
     package?: string,
@@ -20,6 +21,7 @@ export interface Suggestion extends vscode.CompletionItem {
 
 export class Command {
     extension: Extension
+    private environment: Environment
 
     packages: string[] = []
     bracketCmds: {[key: string]: Suggestion} = {}
@@ -28,11 +30,12 @@ export class Command {
     private defaultSymbols: Suggestion[] = []
     private packageCmds: {[pkg: string]: Suggestion[]} = {}
 
-    constructor(extension: Extension) {
+    constructor(extension: Extension, environment: Environment) {
         this.extension = extension
+        this.environment = environment
     }
 
-    initialize(defaultCmds: {[key: string]: DataItemEntry}, defaultEnvs: string[]) {
+    initialize(defaultCmds: {[key: string]: CmdItemEntry}) {
         const snippetReplacements = vscode.workspace.getConfiguration('latex-workshop').get('intellisense.commandsJSON.replace') as {[key: string]: string}
 
         // Initialize default commands and `latex-mathsymbols`
@@ -41,30 +44,16 @@ export class Command {
                 const action = snippetReplacements[key]
                 if (action !== '') {
                     defaultCmds[key].snippet = action
-                    this.defaultCmds.push(this.entryToCompletion(defaultCmds[key]))
+                    this.defaultCmds.push(this.entryCmdToCompletion(defaultCmds[key]))
                 }
             } else {
-                this.defaultCmds.push(this.entryToCompletion(defaultCmds[key]))
+                this.defaultCmds.push(this.entryCmdToCompletion(defaultCmds[key]))
             }
         })
 
-        // Initialize default env begin-end pairs, de-duplication
-        Array.from(new Set(defaultEnvs)).forEach(env => {
-            const suggestion: Suggestion = {
-                label: env,
-                kind: vscode.CompletionItemKind.Snippet,
-                package: ''
-            }
-            // Use 'an' or 'a' depending on the first letter
-            const art = ['a', 'e', 'i', 'o', 'u'].includes(`${env}`.charAt(0)) ? 'an' : 'a'
-            suggestion.detail = `Insert ${art} ${env} environment.`
-            if (['enumerate', 'itemize'].includes(env)) {
-                suggestion.insertText = new vscode.SnippetString(`begin{${env}}\n\t\\item $0\n\\\\end{${env}}`)
-            } else {
-                suggestion.insertText = new vscode.SnippetString(`begin{${env}}\n\t$0\n\\\\end{${env}}`)
-            }
-            suggestion.filterText = env
-            this.defaultCmds.push(suggestion)
+        // Initialize default env begin-end pairs
+        this.environment.getDefaultEnvs(EnvSnippetType.AsCommand).forEach(cmd => {
+            this.defaultCmds.push(cmd)
         })
 
         // Handle special commands with brackets
@@ -94,7 +83,7 @@ export class Command {
             if (this.defaultSymbols.length === 0) {
                 const symbols = JSON.parse(fs.readFileSync(`${this.extension.extensionRoot}/data/unimathsymbols.json`).toString())
                 Object.keys(symbols).forEach(key => {
-                    this.defaultSymbols.push(this.entryToCompletion(symbols[key]))
+                    this.defaultSymbols.push(this.entryCmdToCompletion(symbols[key]))
                 })
             }
             this.defaultSymbols.forEach(symbol => {
@@ -104,32 +93,36 @@ export class Command {
         }
 
         // Insert commands from packages
-        const extraPackages = configuration.get('intellisense.package.extra') as string[]
-        if (extraPackages) {
-            extraPackages.forEach(pkg => {
-                this.provideCmdInPkg(pkg, suggestions, cmdList)
+        if ((configuration.get('intellisense.package.enabled'))) {
+            const extraPackages = configuration.get('intellisense.package.extra') as string[]
+            if (extraPackages) {
+                extraPackages.forEach(pkg => {
+                    this.provideCmdInPkg(pkg, suggestions, cmdList)
+                    this.environment.provideEnvsAsCommandInPkg(pkg, suggestions, cmdList)
+                })
+            }
+            this.extension.manager.getIncludedTeX().forEach(tex => {
+                const pkgs = this.extension.manager.cachedContent[tex].element.package
+                if (pkgs !== undefined) {
+                    pkgs.forEach(pkg => {
+                        this.provideCmdInPkg(pkg, suggestions, cmdList)
+                        this.environment.provideEnvsAsCommandInPkg(pkg, suggestions, cmdList)
+                    })
+                }
             })
         }
-        this.extension.manager.getIncludedTeX().forEach(tex => {
-            const pkgs = this.extension.manager.cachedContent[tex].element.package
-            if (pkgs === undefined) {
-                return
-            }
-            pkgs.forEach(pkg => this.provideCmdInPkg(pkg, suggestions, cmdList))
-        })
 
         // Start working on commands in tex
         this.extension.manager.getIncludedTeX().forEach(tex => {
             const cmds = this.extension.manager.cachedContent[tex].element.command
-            if (cmds === undefined) {
-                return
+            if (cmds !== undefined) {
+                cmds.forEach(cmd => {
+                    if (!cmdList.includes(this.getCmdName(cmd, true))) {
+                        suggestions.push(cmd)
+                        cmdList.push(this.getCmdName(cmd, true))
+                    }
+                })
             }
-            cmds.forEach(cmd => {
-                if (!cmdList.includes(this.getCmdName(cmd, true))) {
-                    suggestions.push(cmd)
-                    cmdList.push(this.getCmdName(cmd, true))
-                }
-            })
         })
 
         return suggestions
@@ -217,36 +210,7 @@ export class Command {
 
     updatePkg(file: string, nodes?: latexParser.Node[], content?: string) {
         if (nodes !== undefined) {
-            nodes.forEach(node => {
-                if (latexParser.isCommand(node) && node.name === 'usepackage') {
-                    node.args.forEach(arg => {
-                        if (latexParser.isOptionalArg(arg)) {
-                            return
-                        }
-                        for (const c of arg.content) {
-                            if (!latexParser.isTextString(c)) {
-                                continue
-                            }
-                            c.content.split(',').forEach(pkg => {
-                                pkg = pkg.trim()
-                                if (pkg === '') {
-                                    return
-                                }
-                                const pkgs = this.extension.manager.cachedContent[file].element.package
-                                if (pkgs) {
-                                    pkgs.push(pkg)
-                                } else {
-                                    this.extension.manager.cachedContent[file].element.package = [pkg]
-                                }
-                            })
-                        }
-                    })
-                } else {
-                    if (latexParser.hasContentArray(node)) {
-                        this.updatePkg(file, node.content)
-                    }
-                }
-            })
+            this.updatePkgWithNodeArray(file, nodes)
         } else if (content !== undefined) {
             const pkgReg = /\\usepackage(?:\[[^[\]{}]*\])?{(.*)}/g
             const pkgs: string[] = []
@@ -266,17 +230,69 @@ export class Command {
                         return
                     }
                     const filePkgs = this.extension.manager.cachedContent[file].element.package
-                    if (filePkgs !== undefined) {
+                    if (filePkgs) {
                         filePkgs.push(pkg)
+                    } else {
+                        this.extension.manager.cachedContent[file].element.package = [pkg]
                     }
                 })
             }
         }
     }
 
+    updatePkgWithNodeArray(file: string, nodes: latexParser.Node[]) {
+        nodes.forEach(node => {
+            if ( latexParser.isCommand(node) && (node.name === 'usepackage' || node.name === 'documentclass') ) {
+                node.args.forEach(arg => {
+                    if (latexParser.isOptionalArg(arg)) {
+                        return
+                    }
+                    for (const c of arg.content) {
+                        if (!latexParser.isTextString(c)) {
+                            continue
+                        }
+                        c.content.split(',').forEach(pkg => {
+                            pkg = pkg.trim()
+                            if (pkg === '') {
+                                return
+                            }
+                            if (node.name === 'documentclass') {
+                                pkg = 'class-' + pkg
+                            }
+                            const pkgs = this.extension.manager.cachedContent[file].element.package
+                            if (pkgs) {
+                                pkgs.push(pkg)
+                            } else {
+                                this.extension.manager.cachedContent[file].element.package = [pkg]
+                            }
+                        })
+                    }
+                })
+            } else {
+                if (latexParser.hasContentArray(node)) {
+                    this.updatePkgWithNodeArray(file, node.content)
+                }
+            }
+        })
+    }
+
     private getCmdFromNode(file: string, node: latexParser.Node, cmdList: string[] = []): Suggestion[] {
         const cmds: Suggestion[] = []
-        if (latexParser.isCommand(node)) {
+        if (latexParser.isDefCommand(node)) {
+           const name = node.token.slice(1)
+            if (!cmdList.includes(name)) {
+                const cmd: Suggestion = {
+                    label: `\\${name}`,
+                    kind: vscode.CompletionItemKind.Function,
+                    documentation: '`' + name + '`',
+                    insertText: new vscode.SnippetString(name + this.getArgsFromNode(node)),
+                    filterText: name,
+                    package: ''
+                }
+                cmds.push(cmd)
+                cmdList.push(name)
+            }
+        } else if (latexParser.isCommand(node)) {
             if (!cmdList.includes(node.name)) {
                 const cmd: Suggestion = {
                     label: `\\${node.name}`,
@@ -286,13 +302,13 @@ export class Command {
                     filterText: node.name,
                     package: ''
                 }
-                if (node.name.match(/([a-zA-Z]*(cite|ref)[a-zA-Z]*)|begin/)) {
+                if (node.name.match(/([a-zA-Z]*(cite|ref)[a-zA-Z]*)|bibentry|begin/)) {
                     cmd.command = { title: 'Post-Action', command: 'editor.action.triggerSuggest' }
                 }
                 cmds.push(cmd)
                 cmdList.push(node.name)
             }
-            if (['newcommand', 'renewcommand', 'providecommand'].includes(node.name) &&
+            if (['newcommand', 'renewcommand', 'providecommand', 'DeclarePairedDelimiter', 'DeclarePairedDelimiterX', 'DeclarePairedDelimiterXPP'].includes(node.name) &&
                 Array.isArray(node.args) && node.args.length > 0) {
                 const label = (node.args[0].content[0] as latexParser.Command).name
                 let args = ''
@@ -334,19 +350,31 @@ export class Command {
             return args
         }
         let index = 0
-        node.args.forEach(arg => {
-            ++index
-            if (latexParser.isOptionalArg(arg)) {
-                args += '[${' + index + '}]'
-            } else {
-                args += '{${' + index + '}}'
-            }
-        })
+        if (latexParser.isCommand(node)) {
+            node.args.forEach(arg => {
+                ++index
+                if (latexParser.isOptionalArg(arg)) {
+                    args += '[${' + index + '}]'
+                } else {
+                    args += '{${' + index + '}}'
+                }
+            })
+            return args
+        }
+        if (latexParser.isDefCommand(node)) {
+            node.args.forEach(arg => {
+                ++index
+                if (latexParser.isCommandParameter(arg)) {
+                    args += '{${' + index + '}}'
+                }
+            })
+            return args
+        }
         return args
     }
 
     private getCmdFromContent(file: string, content: string): Suggestion[] {
-        const cmdReg = /\\([a-zA-Z]+)({[^{}]*})?({[^{}]*})?({[^{}]*})?/g
+        const cmdReg = /\\([a-zA-Z@]+)({[^{}]*})?({[^{}]*})?({[^{}]*})?/g
         const cmds: Suggestion[] = []
         const cmdList: string[] = []
         while (true) {
@@ -366,14 +394,14 @@ export class Command {
                 filterText: result[1],
                 package: ''
             }
-            if (result[1].match(/([a-zA-Z]*(cite|ref)[a-zA-Z]*)|begin/)) {
+            if (result[1].match(/([a-zA-Z]*(cite|ref)[a-zA-Z]*)|bibentry|begin/)) {
                 cmd.command = { title: 'Post-Action', command: 'editor.action.triggerSuggest' }
             }
             cmds.push(cmd)
             cmdList.push(result[1])
         }
 
-        const newCommandReg = /\\(?:re|provide)?(?:new)?command(?:{)?\\(\w+)/g
+        const newCommandReg = /\\(?:(?:(?:re|provide)?(?:new)?command)|(?:DeclarePairedDelimiter(?:X|XPP)?))(?:{)?\\(\w+)/g
         while (true) {
             const result = newCommandReg.exec(content)
             if (result === null) {
@@ -420,7 +448,7 @@ export class Command {
         return text
     }
 
-    private entryToCompletion(item: DataItemEntry): Suggestion {
+    private entryCmdToCompletion(item: CmdItemEntry): Suggestion {
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
         const useTabStops = configuration.get('intellisense.useTabStops.enabled')
         const backslash = item.command.startsWith(' ') ? '' : '\\'
@@ -459,9 +487,6 @@ export class Command {
 
     private provideCmdInPkg(pkg: string, suggestions: vscode.CompletionItem[], cmdList: string[]) {
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
-        if (!(configuration.get('intellisense.package.enabled'))) {
-            return
-        }
         const useOptionalArgsEntries = configuration.get('intellisense.optionalArgsEntries.enabled')
         // Load command in pkg
         if (!(pkg in this.packageCmds)) {
@@ -479,10 +504,8 @@ export class Command {
             if (fs.existsSync(filePath)) {
                 const cmds = JSON.parse(fs.readFileSync(filePath).toString())
                 Object.keys(cmds).forEach(key => {
-                    this.packageCmds[pkg].push(this.entryToCompletion(cmds[key]))
+                    this.packageCmds[pkg].push(this.entryCmdToCompletion(cmds[key]))
                 })
-            } else {
-                this.packageCmds[pkg] = []
             }
         }
 

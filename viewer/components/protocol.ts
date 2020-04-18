@@ -1,6 +1,8 @@
 export type ServerResponse = {
     type: 'refresh'
 } | {
+    type: 'request_status'
+} | {
     type: 'params',
     scale: string,
     trim: number,
@@ -28,6 +30,9 @@ export type ClientRequest = {
 } | {
     type: 'close'
 } | {
+    type: 'request_params',
+    path: string
+} | {
     type: 'loaded',
     path: string
 } | {
@@ -35,6 +40,10 @@ export type ClientRequest = {
     url: string
 } | {
     type: 'ping'
+} | {
+    type: 'status',
+    path: string,
+    scrollTop: number
 } | {
     type: 'reverse_synctex',
     path: string,

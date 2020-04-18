@@ -9,17 +9,18 @@ import * as utils from '../utils/utils'
 import {Extension} from '../main'
 import {Suggestion as CiteEntry} from '../providers/completer/citation'
 import {Suggestion as CmdEntry} from '../providers/completer/command'
+import {Suggestion as EnvEntry} from '../providers/completer/environment'
 
 interface Content {
     [filepath: string]: { // tex file name
         content: string, // the dirty (under editing) contents
         element: {
             reference?: vscode.CompletionItem[],
-            environment?: vscode.CompletionItem[],
+            environment?: EnvEntry[],
             bibitem?: CiteEntry[],
             command?: CmdEntry[],
             package?: string[]
-        }, // latex elements for completion, e.g., reference defition
+        }, // latex elements for completion, e.g., reference definition
         children: { // sub-files, should be tex or plain files
             index: number, // the index of character sub-content is inserted
             file: string // the path to the sub-file
@@ -33,27 +34,45 @@ export class Manager {
 
     private extension: Extension
     private fileWatcher?: chokidar.FSWatcher
+    private pdfWatcher?: chokidar.FSWatcher
     private bibWatcher?: chokidar.FSWatcher
     private filesWatched: string[] = []
+    private pdfsWatched: string[] = []
     private bibsWatched: string[] = []
     private watcherOptions: chokidar.WatchOptions
+    private rsweaveExt: string[] = ['.rnw', '.Rnw', '.rtex', '.Rtex', '.snw', '.Snw']
+    private pdfWatcherOptions: chokidar.WatchOptions
 
     constructor(extension: Extension) {
         this.extension = extension
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
         const usePolling = configuration.get('latex.watch.usePolling') as boolean
         const interval = configuration.get('latex.watch.interval') as number
+        const delay = configuration.get('latex.watch.delay') as number
+        const pdfDelay = configuration.get('latex.watch.pdfDelay') as number
         this.watcherOptions = {
             useFsEvents: false,
             usePolling,
             interval,
-            binaryInterval: Math.max(interval, 1000)
+            binaryInterval: Math.max(interval, 1000),
+            awaitWriteFinish: {stabilityThreshold: delay}
         }
+        this.pdfWatcherOptions = {
+            useFsEvents: false,
+            usePolling,
+            interval,
+            binaryInterval: Math.max(interval, 1000),
+            awaitWriteFinish: {stabilityThreshold: pdfDelay}
+        }
+        this.initiatePdfWatcher()
     }
 
-    /* Returns the output directory developed according to the input tex path
-       and 'latex.outDir' config. If undefined is passed in, the default root
-       file is used. If there is not root file, './' is output. */
+    /**
+     * Returns the output directory developed according to the input tex path
+     * and 'latex.outDir' config. If undefined is passed in, the default root
+     * file is used. If there is not root file, './' is output.
+     * The return path always uses `/` even on Windows
+     */
     getOutDir(texPath?: string) {
         if (texPath === undefined) {
             texPath = this.rootFile
@@ -63,23 +82,10 @@ export class Manager {
             return './'
         }
 
-        /* if current file is a localRootFile, then we take the rootFile for computing
-           placeholders substitution.
-           We add to outdir the extra directory levels relative to the rootFile. */
-        let relativePath: string = ''
-        if (this.localRootFile === texPath && this.rootFile !== undefined) {
-           relativePath = path.relative(path.dirname(this.rootFile), path.dirname(texPath))
-           texPath = this.rootFile
-        }
-        const doc = texPath.replace(/\.tex$/, '').split(path.sep).join('/')
-        const docfile = path.basename(texPath, '.tex')
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
-        const docker = configuration.get('docker.enabled')
-        const out = path.join(configuration.get('latex.outDir') as string, relativePath)
-        return out.replace(/%DOC%/g, docker ? docfile : doc)
-                  .replace(/%DOCFILE%/g, docfile)
-                  .replace(/%DIR%/g, docker ? './' : path.dirname(texPath).split(path.sep).join('/'))
-                  .replace(/%TMPDIR%/g, this.extension.builder.tmpDir)
+        const outDir = configuration.get('latex.outDir') as string
+        const out = utils.replaceArgumentPlaceholders(texPath, this.extension.builder.tmpDir)(outDir)
+        return path.normalize(out).split(path.sep).join('/')
     }
 
     get rootDir() {
@@ -104,6 +110,25 @@ export class Manager {
         this.localRootFiles[this.workspaceRootDir] = localRoot
     }
 
+    private rootFilesLanguageIds: { [key: string]: string | undefined } = {}
+    get rootFileLanguageId() {
+        return this.rootFilesLanguageIds[this.workspaceRootDir]
+    }
+    set rootFileLanguageId(id: string | undefined) {
+        this.rootFilesLanguageIds[this.workspaceRootDir] = id
+    }
+
+    private inferLanguageId(filename: string): string | undefined {
+        const ext = path.extname(filename)
+        if (ext === '.tex') {
+            return 'latex'
+        } else if (this.rsweaveExt.includes(ext)) {
+            return 'rsweave'
+        } else {
+            return undefined
+        }
+    }
+
     tex2pdf(texPath: string, respectOutDir: boolean = true) {
         let outDir = './'
         if (respectOutDir) {
@@ -118,29 +143,31 @@ export class Manager {
 
     private workspaceRootDir: string = ''
     private findWorkspace() {
+        const workspaceFolders = vscode.workspace.workspaceFolders
+        const firstDir = workspaceFolders && workspaceFolders[0]
         // If no workspace is opened.
-        if (vscode.workspace.workspaceFolders === undefined) {
+        if (workspaceFolders === undefined || !firstDir) {
             this.workspaceRootDir = ''
             return
         }
         // If we don't have an active text editor, we can only make a guess.
         // Let's guess the first one.
         if (!vscode.window.activeTextEditor) {
-            this.workspaceRootDir = vscode.workspace.workspaceFolders[0].uri.fsPath
+            this.workspaceRootDir = firstDir.uri.fsPath
             return
         }
         // Guess that the correct workspace folder path should be contained in
         // the path of active editor. If there are multiple matches, take the
         // first one.
         const activeFile = vscode.window.activeTextEditor.document.uri.fsPath
-        for (const workspaceFolder of vscode.workspace.workspaceFolders) {
+        for (const workspaceFolder of workspaceFolders) {
             if (activeFile.includes(workspaceFolder.uri.fsPath)) {
                 this.workspaceRootDir = workspaceFolder.uri.fsPath
                 return
             }
         }
         // Guess that the first workspace is the chosen one.
-        this.workspaceRootDir = vscode.workspace.workspaceFolders[0].uri.fsPath
+        this.workspaceRootDir = firstDir.uri.fsPath
     }
 
     /**
@@ -154,6 +181,7 @@ export class Manager {
         const findMethods = [
             () => this.findRootFromMagic(),
             () => this.findRootFromActive(),
+            () => this.findRootFromCurrentRoot(),
             () => this.findRootInWorkspace()
         ]
         for (const method of findMethods) {
@@ -164,6 +192,7 @@ export class Manager {
             if (this.rootFile !== rootFile) {
                 this.extension.logger.addLogMessage(`Root file changed from: ${this.rootFile} to ${rootFile}. Find all dependencies.`)
                 this.rootFile = rootFile
+                this.rootFileLanguageId = this.inferLanguageId(rootFile)
                 this.initiateFileWatcher()
                 this.initiateBibWatcher()
                 this.parseFileAndSubs(this.rootFile) // finish the parsing is required for subsequent refreshes.
@@ -173,6 +202,16 @@ export class Manager {
                 this.extension.logger.addLogMessage(`Root file remains unchanged from: ${this.rootFile}.`)
             }
             return rootFile
+        }
+        return undefined
+    }
+
+    private findRootFromCurrentRoot(): string | undefined {
+        if (!vscode.window.activeTextEditor || this.rootFile === undefined) {
+            return undefined
+        }
+        if (this.getIncludedTeX().includes(vscode.window.activeTextEditor.document.fileName)) {
+            return this.rootFile
         }
         return undefined
     }
@@ -188,6 +227,11 @@ export class Manager {
         const fileStack: string[] = []
         if (result) {
             let file = path.resolve(path.dirname(vscode.window.activeTextEditor.document.fileName), result[1])
+            if (!fs.existsSync(file)) {
+                const msg = `Not found root file specified in the magic comment: ${file}`
+                this.extension.logger.addLogMessage(msg)
+                throw new Error(msg)
+            }
             fileStack.push(file)
             this.extension.logger.addLogMessage(`Found root file by magic comment: ${file}`)
 
@@ -204,6 +248,11 @@ export class Manager {
                     this.extension.logger.addLogMessage(`Recursively found root file by magic comment: ${file}`)
                 }
 
+                if (!fs.existsSync(file)) {
+                    const msg = `Not found root file specified in the magic comment: ${file}`
+                    this.extension.logger.addLogMessage(msg)
+                    throw new Error(msg)
+                }
                 content = fs.readFileSync(file).toString()
                 result = content.match(regex)
             }
@@ -237,11 +286,15 @@ export class Manager {
         if (!vscode.window.activeTextEditor) {
             return undefined
         }
-        const regex = /(?:\\documentclass\[(.*(?:\.tex))\]{subfiles})/
+        const regex = /(?:\\documentclass\[(.*)\]{subfiles})/
         const result = content.match(regex)
         if (result) {
-            const file = path.resolve(path.dirname(vscode.window.activeTextEditor.document.fileName), result[1])
-            this.extension.logger.addLogMessage(`Found root file of this subfile from active editor: ${file}`)
+            const file = utils.resolveFile([path.dirname(vscode.window.activeTextEditor.document.fileName)], result[1])
+            if (file) {
+                this.extension.logger.addLogMessage(`Found root file of this subfile from active editor: ${file}`)
+            } else {
+                this.extension.logger.addLogMessage(`Cannot find root file of this subfile from active editor: ${result[1]}`)
+            }
             return file
         }
         return undefined
@@ -284,9 +337,11 @@ export class Manager {
         return undefined
     }
 
-    /* This function returns a string array which holds all imported tex files
-       from the given `file`. If it is undefined, this function traces from the
-       root file, or return empty array if root is undefined */
+    /**
+     * This function returns a string array which holds all imported tex files
+     * from the given `file`. If it is undefined, this function traces from the
+     * root file, or return empty array if root is undefined
+     */
     getIncludedTeX(file?: string, includedTeX: string[] = []) {
         if (file === undefined) {
             file = this.rootFile
@@ -323,14 +378,31 @@ export class Manager {
         return fileContent
     }
 
-    /* This function is called when a root file is found or a watched file is
-       changed (in vscode or externally). It searches the subfiles, including
-       \input siblings, bib files, and related fls file to construct a file
-       dependency data structure in `this.cachedContent`. Noted that only the
-       provided `file` is re-parsed, together with any new files that were not
-       previously watched/considered. Since this function is called upon content
-       changes, this lazy loading should be fine. */
+    private isExcluded(file: string): boolean {
+        const globsToIgnore = vscode.workspace.getConfiguration('latex-workshop').get('latex.watch.files.ignore') as string[]
+        const format = (str: string): string => {
+            if (os.platform() === 'win32') {
+                return str.replace(/\\/g, '/')
+            }
+            return str
+        }
+        return micromatch.some(file, globsToIgnore, { format } as any)
+    }
+
+    /**
+     * This function is called when a root file is found or a watched file is
+     * changed (in vscode or externally). It searches the subfiles, including
+     * \input siblings, bib files, and related fls file to construct a file
+     * dependency data structure in `this.cachedContent`. Noted that only the
+     * provided `file` is re-parsed, together with any new files that were not
+     * previously watched/considered. Since this function is called upon content
+     * changes, this lazy loading should be fine.
+     */
     parseFileAndSubs(file: string, onChange: boolean = false) {
+        if (this.isExcluded(file)) {
+            this.extension.logger.addLogMessage(`Ignoring ${file}`)
+            return
+        }
         this.extension.logger.addLogMessage(`Parsing ${file}`)
         if (this.fileWatcher && !this.filesWatched.includes(file)) {
             // The file is first time considered by the extension.
@@ -343,13 +415,16 @@ export class Manager {
         this.cachedFullContent = undefined
         this.parseInputFiles(content, file)
         this.parseBibFiles(content, file)
-        // It seems that we do not need to parse so many fls files.
-        // this.parseFlsFile(file)
+        // We need to parse the fls to discover file dependencies when defined by TeX macro
+        // It happens a lot with subfiles, https://tex.stackexchange.com/questions/289450/path-of-figures-in-different-directories-with-subfile-latex
+        this.parseFlsFile(file)
     }
 
     private cachedFullContent: string | undefined
-    /* This function returns the flattened content from the given file,
-       typically the root file. */
+    /**
+     * This function returns the flattened content from the given file,
+     * typically the root file.
+     */
     getContent(file?: string, fileTrace: string[] = []): string {
         // Here we make a copy, so that the tree structure of tex dependency
         // Can be maintained. For instance, main -> s1 and s2, both of which
@@ -398,7 +473,7 @@ export class Manager {
         // Update children of current file
         if (this.cachedContent[file] === undefined) {
             this.cachedContent[file] = {content, element: {}, bibs: [], children: []}
-            const inputReg = /(?:\\(?:input|InputIfFileExists|include|subfile|(?:(?:sub)?(?:import|inputfrom|includefrom)\*?{([^}]*)}))(?:\[[^[\]{}]*\])?){([^}]*)}/g
+            const inputReg = /(?:\\(?:input|InputIfFileExists|include|SweaveInput|subfile|(?:(?:sub)?(?:import|inputfrom|includefrom)\*?{([^}]*)}))(?:\[[^[\]{}]*\])?){([^}]*)}/g
             while (true) {
                 const result = inputReg.exec(content)
                 if (!result) {
@@ -432,7 +507,7 @@ export class Manager {
     }
 
     private parseInputFiles(content: string, baseFile: string) {
-        const inputReg = /(?:\\(?:input|InputIfFileExists|include|subfile|(?:(?:sub)?(?:import|inputfrom|includefrom)\*?{([^}]*)}))(?:\[[^[\]{}]*\])?){([^}]*)}/g
+        const inputReg = /(?:\\(?:input|InputIfFileExists|include|SweaveInput|subfile|(?:(?:sub)?(?:import|inputfrom|includefrom)\*?{([^}]*)}))(?:\[[^[\]{}]*\])?){([^}]*)}/g
         while (true) {
             const result = inputReg.exec(content)
             if (!result) {
@@ -459,7 +534,7 @@ export class Manager {
         }
     }
 
-    private parseInputFilePath(regResult: RegExpExecArray, baseFile: string): string | null {
+    private parseInputFilePath(regResult: RegExpExecArray, baseFile: string): string | undefined {
         const texDirs = vscode.workspace.getConfiguration('latex-workshop').get('latex.texDirs') as string[]
         if (regResult[0].startsWith('\\subimport') || regResult[0].startsWith('\\subinputfrom') || regResult[0].startsWith('\\subincludefrom')) {
             return utils.resolveFile([path.dirname(baseFile)], path.join(regResult[1], regResult[2]))
@@ -495,10 +570,12 @@ export class Manager {
         }
     }
 
-    /* This function parses the content of a fls attached to the given base tex
-       file. All input files are considered as included subfiles/non-tex files,
-       and all output files will be check if there are aux files related. If so,
-       the aux files are parsed for any possible bib file. */
+    /**
+     * This function parses the content of a fls attached to the given base tex
+     * file. All input files are considered as included subfiles/non-tex files,
+     * and all output files will be check if there are aux files related. If so,
+     * the aux files are parsed for any possible bib file.
+     */
     parseFlsFile(baseFile: string) {
         this.extension.logger.addLogMessage('Parse fls file.')
         const rootDir = path.dirname(baseFile)
@@ -508,19 +585,12 @@ export class Manager {
             this.extension.logger.addLogMessage('Cannot find fls file.')
             return
         }
-        const ioFiles = this.parseFlsContent(fs.readFileSync(flsFile).toString(), flsFile)
+        const ioFiles = this.parseFlsContent(fs.readFileSync(flsFile).toString(), rootDir)
 
-        const globsToIgnore = vscode.workspace.getConfiguration('latex-workshop').get('latex.watch.files.ignore') as string[]
-        const format = (str: string): string => {
-            if (os.platform() === 'win32') {
-                return str.replace(/\\/g, '/')
-            }
-            return str
-        }
         ioFiles.input.forEach((inputFile: string) => {
             // Drop files that are also listed as OUTPUT or should be ignored
             if (ioFiles.output.includes(inputFile) ||
-                micromatch.some(inputFile, globsToIgnore, { format } as any) ||
+                this.isExcluded(inputFile) ||
                 !fs.existsSync(inputFile)) {
                 return
             }
@@ -543,7 +613,7 @@ export class Manager {
         })
 
         ioFiles.output.forEach((outputFile: string) => {
-            if (path.extname(outputFile) === '.aux' ) {
+            if (path.extname(outputFile) === '.aux' && fs.existsSync(outputFile)) {
                 this.parseAuxFile(fs.readFileSync(outputFile).toString(),
                                   path.dirname(outputFile).replace(outDir, rootDir))
             }
@@ -573,10 +643,9 @@ export class Manager {
         }
     }
 
-    private parseFlsContent(content: string, flsFile: string): {input: string[], output: string[]} {
+    private parseFlsContent(content: string, rootDir: string): {input: string[], output: string[]} {
         const inputFiles: Set<string> = new Set()
         const outputFiles: Set<string> = new Set()
-        const pwd = path.dirname(flsFile)
         const regex = /^(?:(INPUT)\s*(.*))|(?:(OUTPUT)\s*(.*))$/gm
         // regex groups
         // #1: an INPUT entry --> #2 input file path
@@ -587,12 +656,12 @@ export class Manager {
                 break
             }
             if (result[1]) {
-                const inputFilePath = path.resolve(pwd, result[2])
+                const inputFilePath = path.resolve(rootDir, result[2])
                 if (inputFilePath) {
                     inputFiles.add(inputFilePath)
                 }
             } else if (result[3]) {
-                const outputFilePath = path.resolve(pwd, result[4])
+                const outputFilePath = path.resolve(rootDir, result[4])
                 if (outputFilePath) {
                     outputFiles.add(outputFilePath)
                 }
@@ -643,7 +712,7 @@ export class Manager {
 
     private onWatchingNewFile(file: string) {
         this.extension.logger.addLogMessage(`Adding ${file} to file watcher.`)
-        if (['.tex', '.bib', '.rnw', '.Rnw', '.rtex', '.Rtex'].includes(path.extname(file)) &&
+        if (['.tex', '.bib'].concat(this.rsweaveExt).includes(path.extname(file)) &&
             !file.includes('expl3-code.tex')) {
             this.updateCompleterOnChange(file)
         }
@@ -652,7 +721,7 @@ export class Manager {
     private onWatchedFileChanged(file: string) {
         this.extension.logger.addLogMessage(`File watcher: responding to change in ${file}`)
         // It is possible for either tex or non-tex files in the watcher.
-        if (['.tex', '.bib', '.rnw', '.Rnw', '.rtex', '.Rtex'].includes(path.extname(file)) &&
+        if (['.tex', '.bib'].concat(this.rsweaveExt).includes(path.extname(file)) &&
             !file.includes('expl3-code.tex')) {
             this.parseFileAndSubs(file, true)
             this.updateCompleterOnChange(file)
@@ -698,6 +767,37 @@ export class Manager {
         }
     }
 
+    private initiatePdfWatcher() {
+        if (this.pdfWatcher !== undefined) {
+            return
+        }
+        this.extension.logger.addLogMessage('Creating file watcher for .pdf files.')
+        this.pdfWatcher = chokidar.watch([], this.pdfWatcherOptions)
+        this.pdfWatcher.on('change', (file: string) => this.onWatchedPdfChanged(file))
+        this.pdfWatcher.on('unlink', (file: string) => this.onWatchedPdfDeleted(file))
+    }
+
+    private onWatchedPdfChanged(file: string) {
+        this.extension.logger.addLogMessage(`PDF file watcher - responding to change in ${file}`)
+        this.extension.viewer.refreshExistingViewer()
+    }
+
+    onWatchedPdfDeleted(file: string) {
+        this.extension.logger.addLogMessage(`PDF file watcher: ${file} deleted.`)
+        if (this.pdfWatcher) {
+            this.pdfWatcher.unwatch(file)
+        }
+        this.pdfsWatched.splice(this.pdfsWatched.indexOf(file), 1)
+    }
+
+    watchPdfFile(pdfPath: string) {
+        if (this.pdfWatcher && !this.pdfsWatched.includes(pdfPath)) {
+            this.extension.logger.addLogMessage(`Adding .pdf file ${pdfPath} to pdf file watcher.`)
+            this.pdfWatcher.add(pdfPath)
+            this.pdfsWatched.push(pdfPath)
+        }
+    }
+
     private buildOnFileChanged(file: string, bibChanged: boolean = false) {
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
         if (configuration.get('latex.autoBuild.run') as string !== 'onFileChange') {
@@ -709,9 +809,9 @@ export class Manager {
         }
         this.extension.logger.addLogMessage(`${file} changed. Auto build project.`)
         if (!bibChanged && this.localRootFile && configuration.get('latex.rootFile.useSubFile')) {
-            this.extension.commander.build(true, this.localRootFile)
+            this.extension.commander.build(true, this.localRootFile, this.rootFileLanguageId)
         } else {
-            this.extension.commander.build(true, this.rootFile)
+            this.extension.commander.build(true, this.rootFile, this.rootFileLanguageId)
         }
     }
 
@@ -721,7 +821,9 @@ export class Manager {
         this.extension.completer.input.getGraphicsPath(file)
     }
 
-    // This function updates all completers upon tex-file changes, or active file content is changed.
+    /**
+     * This function updates all completers upon tex-file changes, or active file content is changed.
+     */
     async updateCompleter(file: string, content: string) {
         this.extension.completer.citation.update(file, content)
         // Here we use this delay config. Otherwise, multiple updates may run

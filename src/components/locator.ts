@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as cp from 'child_process'
 import * as synctexjs from './synctex'
+import {replaceArgumentPlaceholders} from '../utils/utils'
 
 import {Extension} from '../main'
 import {ClientRequest} from '../../viewer/components/protocol'
@@ -94,7 +95,13 @@ export class Locator {
         }
     }
 
-    syncTeX(args?: {line: number, filePath: string}, forcedViewer: string = 'auto', pdfFile?: string) {
+    /**
+     * Execute forward SyncTeX with respect to `args`.
+     * @param args If undefined, the document and the cursor position of `activeTextEditor` are used.
+     * @param forcedViewer Indicates a PDF viewer with which SyncTeX is executed.
+     * @param pdfFile The path of a PDF File compiled from the `filePath` of `args`. If `undefined`, it is automatically detected.
+     */
+    syncTeX(args?: {line: number, filePath: string}, forcedViewer: 'auto' | 'tabOrBrowser' | 'external' = 'auto', pdfFile?: string) {
         let line: number
         let filePath: string
         let character = 0
@@ -206,7 +213,7 @@ export class Locator {
 
     syncTeXOnRef(args: {line: number, filePath: string}) {
         const configuration = vscode.workspace.getConfiguration('latex-workshop')
-        const viewer = configuration.get('view.pdf.ref.viewer') as string
+        const viewer = configuration.get('view.pdf.ref.viewer') as 'auto' | 'tabOrBrowser' | 'external'
         args.line += 1
         if (viewer) {
             this.syncTeX(args, viewer)
@@ -426,11 +433,12 @@ export class Locator {
         const command = configuration.get('view.pdf.external.synctex.command') as string
         let args = configuration.get('view.pdf.external.synctex.args') as string[]
         if (args) {
-            args = args.map(arg => arg.replace(/%DOC%/g, rootFile.replace(/\.tex$/, '').split(path.sep).join('/'))
-                                      .replace(/%DOCFILE%/g, path.basename(rootFile, '.tex').split(path.sep).join('/'))
-                                      .replace(/%PDF%/g, pdfFile)
-                                      .replace(/%LINE%/g, line.toString())
-                                      .replace(/%TEX%/g, texFile))
+            args = args.map(arg => {
+                return replaceArgumentPlaceholders(rootFile, this.extension.builder.tmpDir)(arg)
+                        .replace(/%PDF%/g, pdfFile)
+                        .replace(/%LINE%/g, line.toString())
+                        .replace(/%TEX%/g, texFile)
+            })
         }
         this.extension.manager.setEnvVar()
         cp.spawn(command, args)

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as process from 'process'
 
 import {Commander} from './commander'
 import {LaTeXCommander} from './components/commander'
@@ -18,6 +19,7 @@ import {Parser as LogParser} from './components/parser/log'
 import {UtensilsParser as PEGParser} from './components/parser/syntax'
 
 import {Completer} from './providers/completion'
+import {BibtexCompleter} from './providers/bibtexcompletion'
 import {CodeActions} from './providers/codeactions'
 import {HoverProvider} from './providers/hover'
 import {GraphicsPreview} from './providers/preview/graphicspreview'
@@ -29,6 +31,7 @@ import {DefinitionProvider} from './providers/definition'
 import {LatexFormatterProvider} from './providers/latexformatter'
 import {FoldingProvider} from './providers/folding'
 import { SnippetPanel } from './components/snippetpanel'
+import { BibtexFormater } from './components/bibtexformater'
 
 import {checkDeprecatedFeatures, newVersionMessage, obsoleteConfigCheck} from './config'
 
@@ -117,9 +120,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('latex-workshop.showCompilationPanel', () => extension.buildInfo.showPanel())
     vscode.commands.registerCommand('latex-workshop.showSnippetPanel', () => extension.snippetPanel.showPanel())
 
-    vscode.commands.registerCommand('latex-workshop.bibsort', () => extension.commander.bibtexFormat(true, false))
-    vscode.commands.registerCommand('latex-workshop.bibalign', () => extension.commander.bibtexFormat(false, true))
-    vscode.commands.registerCommand('latex-workshop.bibalignsort', () => extension.commander.bibtexFormat(true, true))
+    vscode.commands.registerCommand('latex-workshop.bibsort', () => extension.bibtexFormater.bibtexFormat(true, false))
+    vscode.commands.registerCommand('latex-workshop.bibalign', () => extension.bibtexFormater.bibtexFormat(false, true))
+    vscode.commands.registerCommand('latex-workshop.bibalignsort', () => extension.bibtexFormater.bibtexFormat(true, true))
 
     context.subscriptions.push(vscode.workspace.onDidSaveTextDocument( (e: vscode.TextDocument) => {
         if (extension.manager.hasTexId(e.languageId)) {
@@ -141,6 +144,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (e.languageId === 'pdf') {
+            extension.manager.watchPdfFile(e.uri.fsPath)
             vscode.commands.executeCommand('workbench.action.closeActiveEditor').then(() => {
                 extension.commander.pdf(e.uri)
             })
@@ -187,9 +191,6 @@ export function activate(context: vscode.ExtensionContext) {
         } else if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId.toLowerCase() === 'log') {
             extension.logger.status.show()
             vscode.commands.executeCommand('setContext', 'latex-workshop:enabled', true)
-        } else if (!configuration.get('view.autoFocus.enabled')) {
-            extension.logger.status.hide()
-            vscode.commands.executeCommand('setContext', 'latex-workshop:enabled', false)
         }
 
         if (e && extension.manager.hasTexId(e.document.languageId)) {
@@ -202,7 +203,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const latexSelector = selectDocumentsWithId(['latex', 'rsweave'])
     const latexBibtexSelector = selectDocumentsWithId(['latex', 'rsweave', 'bibtex'])
-    const latexDoctexSelector = selectDocumentsWithId(['latex', 'rsweave', ',doctex'])
+    const latexDoctexSelector = selectDocumentsWithId(['latex', 'rsweave', 'doctex'])
     const formatter = new LatexFormatterProvider(extension)
     vscode.languages.registerDocumentFormattingEditProvider(latexBibtexSelector, formatter)
     vscode.languages.registerDocumentRangeFormattingEditProvider(latexBibtexSelector, formatter)
@@ -221,6 +222,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.languages.registerWorkspaceSymbolProvider(new ProjectSymbolProvider(extension)))
     context.subscriptions.push(vscode.languages.registerCompletionItemProvider({ scheme: 'file', language: 'tex'}, extension.completer, '\\', '{'))
     context.subscriptions.push(vscode.languages.registerCompletionItemProvider(latexDoctexSelector, extension.completer, '\\', '{', ',', '(', '['))
+    context.subscriptions.push(vscode.languages.registerCompletionItemProvider({ scheme: 'file', language: 'bibtex'}, new BibtexCompleter(extension), '@'))
     context.subscriptions.push(vscode.languages.registerCodeActionsProvider(latexSelector, extension.codeActions))
     context.subscriptions.push(vscode.languages.registerFoldingRangeProvider(latexSelector, new FoldingProvider(extension)))
 
@@ -242,8 +244,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     return {
         getGraphicsPath: () => extension.completer.input.graphicsPath,
+        builder: {
+            isBuildFinished: process.env['LATEXWORKSHOP_CI'] ? ( () => extension.builder.isBuildFinished() ) : undefined
+        },
         viewer: {
             clients: extension.viewer.clients,
+            getViewerStatus: process.env['LATEXWORKSHOP_CI'] ? ( (pdfFilePath: string) => extension.viewer.getViewerStatus(pdfFilePath) ) : undefined,
             refreshExistingViewer: (sourceFile?: string, viewer?: string) => extension.viewer.refreshExistingViewer(sourceFile, viewer),
             openTab: (sourceFile: string, respectOutDir: boolean = true, column: string = 'right') => extension.viewer.openTab(sourceFile, respectOutDir, column)
         },
@@ -268,7 +274,13 @@ export function activate(context: vscode.ExtensionContext) {
                     })
                     return allPkgs
                 }
-            }
+            },
+            provideCompletionItems: process.env['LATEXWORKSHOP_CI'] ? ((
+                document: vscode.TextDocument,
+                position: vscode.Position,
+                token: vscode.CancellationToken,
+                cxt: vscode.CompletionContext
+            ) => extension.completer.provideCompletionItems(document, position, token, cxt)) : undefined
         }
     }
 }
@@ -297,6 +309,7 @@ export class Extension {
     snippetPanel: SnippetPanel
     graphicsPreview: GraphicsPreview
     mathPreview: MathPreview
+    bibtexFormater: BibtexFormater
 
     constructor() {
         this.extensionRoot = path.resolve(`${__dirname}/../../`)
@@ -321,6 +334,7 @@ export class Extension {
         this.pegParser = new PEGParser(this)
         this.graphicsPreview = new GraphicsPreview(this)
         this.mathPreview = new MathPreview(this)
+        this.bibtexFormater = new BibtexFormater(this)
         this.logger.addLogMessage('LaTeX Workshop initialized.')
     }
 }

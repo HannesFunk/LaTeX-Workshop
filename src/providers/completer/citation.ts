@@ -42,7 +42,8 @@ export class Citation {
             }
             item.filterText = `${item.key} ${item.fields.author} ${item.fields.title} ${item.fields.journal}`
             item.insertText = item.key
-            item.documentation = item.detail
+            item.documentation = new vscode.MarkdownString(item.detail.replace(/\n/g, '  \n'))
+            item.detail = ''
             if (args) {
                 item.range = args.document.getWordRangeAtPosition(args.position, /[-a-zA-Z0-9_:.]+/)
             }
@@ -156,6 +157,7 @@ export class Citation {
             return
         }
         this.bibEntries[file] = []
+        const fields: string[] = (configuration.get('intellisense.citation.format') as string[]).map(f => { return f.toLowerCase() })
         const bibtex = fs.readFileSync(file).toString()
         const ast = await this.extension.pegParser.parseBibtex(bibtex).catch((e) => {
             if (bibtexParser.isSyntaxError(e)) {
@@ -183,7 +185,9 @@ export class Citation {
                     const value = Array.isArray(field.value.content) ?
                         field.value.content.join(' ') : this.deParenthesis(field.value.content)
                     item.fields[field.name] = value
-                    item.detail += `${field.name.charAt(0).toUpperCase() + field.name.slice(1)}: ${value}\n`
+                    if (fields.includes(field.name.toLowerCase())) {
+                        item.detail += `${field.name.charAt(0).toUpperCase() + field.name.slice(1)}: ${value}\n`
+                    }
                 })
                 this.bibEntries[file].push(item)
             })
@@ -227,6 +231,8 @@ export class Citation {
     }
 
     private deParenthesis(str: string) {
-        return str.replace(/{+([^\\{}]+)}+/g, '$1')
+        // Remove wrapping { }
+        // Extract the content of \url{}
+        return str.replace(/\\url{([^\\{}]+)}/g, '$1').replace(/{+([^\\{}]+)}+/g, '$1')
     }
 }

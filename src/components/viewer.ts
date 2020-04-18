@@ -2,7 +2,8 @@ import * as vscode from 'vscode'
 import * as fs from 'fs'
 import * as ws from 'ws'
 import * as path from 'path'
-import * as cp from 'child_process'
+import * as cs from 'cross-spawn'
+import {sleep} from '../utils/utils'
 
 import {Extension} from '../main'
 import {SyncTeXRecordForward} from './locator'
@@ -24,12 +25,35 @@ class Client {
     }
 }
 
+export type ViewerStatus = {
+    path: string,
+    scrollTop: number
+}
+
 export class Viewer {
     extension: Extension
     clients: {[key: string]: Client[]} = {}
+    webviewPanels: Map<string, Set<vscode.WebviewPanel>> = new Map()
+    statusMessageQueue: Map<string, ViewerStatus[]> = new Map()
 
     constructor(extension: Extension) {
         this.extension = extension
+    }
+
+    createClients(pdfFilePath: string) {
+        const key = pdfFilePath.toLocaleUpperCase()
+        this.clients[key] = this.clients[key] || []
+        if (!this.webviewPanels.has(key)) {
+            this.webviewPanels.set(key, new Set())
+        }
+    }
+
+    getClients(pdfFilePath: string): Client[] | undefined {
+        return this.clients[pdfFilePath.toLocaleUpperCase()]
+    }
+
+    getPanelSet(pdfFilePath: string) {
+        return this.webviewPanels.get(pdfFilePath.toLocaleUpperCase())
     }
 
     refreshExistingViewer(sourceFile?: string, viewer?: string): boolean {
@@ -42,7 +66,7 @@ export class Viewer {
             return true
         }
         const pdfFile = this.extension.manager.tex2pdf(sourceFile, true)
-        const clients = this.clients[pdfFile.toLocaleUpperCase()]
+        const clients = this.getClients(pdfFile)
         if (clients !== undefined) {
             let refreshed = false
             // Check all viewer clients with the same path
@@ -85,7 +109,7 @@ export class Viewer {
             return
         }
         const pdfFile = this.extension.manager.tex2pdf(sourceFile)
-        this.clients[pdfFile.toLocaleUpperCase()] = this.clients[pdfFile.toLocaleUpperCase()] || []
+        this.createClients(pdfFile)
 
         try {
             vscode.env.openExternal(vscode.Uri.parse(url))
@@ -109,14 +133,19 @@ export class Viewer {
             return
         }
         const pdfFile = this.extension.manager.tex2pdf(sourceFile, respectOutDir)
-        this.clients[pdfFile.toLocaleUpperCase()] = this.clients[pdfFile.toLocaleUpperCase()] || []
+        this.createClients(pdfFile)
 
         const editor = vscode.window.activeTextEditor
         let viewColumn: vscode.ViewColumn
         if (tabEditorGroup === 'current') {
             viewColumn = vscode.ViewColumn.Active
         } else {
-            viewColumn = vscode.ViewColumn.Beside
+            // If an editor already exists on the left, use it
+            if (tabEditorGroup === 'left' && editor?.viewColumn === vscode.ViewColumn.Two) {
+                viewColumn = vscode.ViewColumn.One
+            } else {
+                viewColumn = vscode.ViewColumn.Beside
+            }
         }
         const panel = vscode.window.createWebviewPanel('latex-workshop-pdf', path.basename(pdfFile), viewColumn, {
             enableScripts: true,
@@ -126,9 +155,16 @@ export class Viewer {
         panel.webview.html = this.getPDFViewerContent(pdfFile)
         if (editor && viewColumn !== vscode.ViewColumn.Active) {
             setTimeout(() => { vscode.window.showTextDocument(editor.document, editor.viewColumn).then(() => {
-                if (tabEditorGroup === 'left') {
+                if (tabEditorGroup === 'left' && viewColumn !== vscode.ViewColumn.One) {
                 vscode.commands.executeCommand('workbench.action.moveActiveEditorGroupRight')
             }}) }, 500)
+        }
+        const panelSet = this.getPanelSet(pdfFile)
+        if (panelSet) {
+            panelSet.add(panel)
+            panel.onDidDispose(() => {
+                panelSet.delete(panel)
+            })
         }
         this.extension.logger.addLogMessage(`Open PDF tab for ${pdfFile}`)
     }
@@ -153,6 +189,14 @@ export class Viewer {
                     iframe.contentWindow.focus();
                 }, 100);
             }
+            // To enable keyboard shortcuts of VS Code when the iframe is focused,
+            // we have to dispatch keyboard events in the parent window.
+            // See https://github.com/microsoft/vscode/issues/65452#issuecomment-586036474
+            window.addEventListener('message', (e) => {
+                if (e.origin === 'http://localhost:${this.extension.server.port}') {
+                    window.dispatchEvent(new KeyboardEvent('keydown', e.data));
+                }
+            });
             </script>
             </body></html>
         `
@@ -185,7 +229,7 @@ export class Viewer {
             args = args.map(arg => arg.replace('%PDF%', pdfFile))
         }
         this.extension.manager.setEnvVar()
-        cp.spawn(command, args, {cwd: path.dirname(sourceFile), detached: true})
+        cs.spawn(command, args, {cwd: path.dirname(sourceFile), detached: true})
         this.extension.logger.addLogMessage(`Open external viewer for ${pdfFile}`)
     }
 
@@ -197,7 +241,7 @@ export class Viewer {
         }
         switch (data.type) {
             case 'open': {
-                clients = this.clients[data.path.toLocaleUpperCase()]
+                clients = this.getClients(data.path)
                 if (clients === undefined) {
                     return
                 }
@@ -220,8 +264,11 @@ export class Viewer {
                 }
                 break
             }
-            case 'loaded': {
-                clients = this.clients[data.path.toLocaleUpperCase()]
+            case 'request_params': {
+                clients = this.getClients(data.path)
+                if (!clients) {
+                    break
+                }
                 for (const client of clients) {
                     if (client.websocket !== websocket) {
                         continue
@@ -240,10 +287,14 @@ export class Viewer {
                             synctex: configuration.get('view.pdf.internal.synctex.keybinding') as 'ctrl-click' | 'double-click'
                         }
                     })
-                    if (configuration.get('synctex.afterBuild.enabled') as boolean) {
-                        this.extension.logger.addLogMessage('SyncTex after build invoked.')
-                        this.extension.locator.syncTeX(undefined, undefined, decodeURIComponent(data.path))
-                    }
+                }
+                break
+            }
+            case 'loaded': {
+                const configuration = vscode.workspace.getConfiguration('latex-workshop')
+                if (configuration.get('synctex.afterBuild.enabled') as boolean) {
+                    this.extension.logger.addLogMessage('SyncTex after build invoked.')
+                    this.extension.locator.syncTeX(undefined, undefined, decodeURIComponent(data.path))
                 }
                 break
             }
@@ -259,6 +310,14 @@ export class Viewer {
                 // nothing to do
                 break
             }
+            case 'status': {
+                const results = this.statusMessageQueue.get(data.path)
+                if (!results) {
+                    break
+                }
+                results.push({ path: data.path, scrollTop: data.scrollTop })
+                break
+            }
             default: {
                 this.extension.logger.addLogMessage(`Unknown websocket message: ${msg}`)
                 break
@@ -267,14 +326,61 @@ export class Viewer {
     }
 
     syncTeX(pdfFile: string, record: SyncTeXRecordForward) {
-        const clients = this.clients[pdfFile.toLocaleUpperCase()]
+        const clients = this.getClients(pdfFile)
         if (clients === undefined) {
             this.extension.logger.addLogMessage(`PDF is not viewed: ${pdfFile}`)
             return
         }
+        const needDelay = this.revealWebviewPanel(pdfFile)
         for (const client of clients) {
-            client.send({type: 'synctex', data: record})
+            setTimeout(() => {
+                client.send({type: 'synctex', data: record})
+            }, needDelay ? 200 : 0)
             this.extension.logger.addLogMessage(`Try to synctex ${pdfFile}`)
         }
     }
+
+    revealWebviewPanel(pdfFilePath: string) {
+        const panelSet = this.getPanelSet(pdfFilePath)
+        if (!panelSet) {
+            return
+        }
+        for (const panel of panelSet.values()) {
+            if (panel.visible) {
+                return
+            }
+        }
+        const activeViewColumn = vscode.window.activeTextEditor?.viewColumn
+        for (const panel of panelSet.values()) {
+            if (panel.viewColumn !== activeViewColumn) {
+                if (!panel.visible) {
+                    panel.reveal(undefined, true)
+                    return true
+                }
+                return
+            }
+        }
+        return
+    }
+
+    async getViewerStatus(pdfFilePath: string): Promise<ViewerStatus[]> {
+        const clients = this.getClients(pdfFilePath)
+        if (clients === undefined || clients.length === 0) {
+            return []
+        }
+        this.statusMessageQueue.set(pdfFilePath, [])
+        for (const client of clients) {
+            client.send({type: 'request_status'})
+        }
+        for (let i = 0; i < 30; i++) {
+            const results = this.statusMessageQueue.get(pdfFilePath)
+            if (results && results.length > 0) {
+                this.statusMessageQueue.delete(pdfFilePath)
+                return results
+            }
+            await sleep(100)
+        }
+        throw new Error('Cannot get viewer status.')
+    }
+
 }

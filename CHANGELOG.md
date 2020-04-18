@@ -1,5 +1,86 @@
 # Change Log
 
+## [8.8.0] - 2020-03-22
+
+### Added
+- (#1949) Make the PDF watcher delay configurable via `latex-workshop.latex.watch.delay`.
+- (#1950) Enable keyboard shortcuts of VS Code on the PDF viewer.
+- (#1955) Add embedded language support for minted ruby.
+- (#1963) Add `\addplot` grammar support.
+- (#1985) Improved intellisense for reference via `latex-workshop.intellisense.citation.format`.
+
+### Removed
+- (#1986) Remove `formatOnSave:false` in latex configuration.
+
+### Fixed
+- (#1947) Normalize `outdir` path.
+- (#1953) Fix clean command with relative `outDir`.
+- (#1962) Use page numbers to cache SVG files.
+- (#1965) Ctrl click to open `documentclass` file.
+- (#1972) Use `rootDir` as PWD when parsing `.fls` file.
+
+## [8.7.2] - 2020-02-12
+
+### Fixed
+- Fix popup severity.
+- (#1811) Wait for write to finish before firing a change event.
+- (#1907) Scan `\DeclarePairedDelimiter` for preview.
+- (#1925) Add setting for prompting user or not with subfile.
+  - The new setting is `latex.rootFile.doNotPrompt`. When set to yes, the file used is decided according to `latex.rootFile.useSubFile`.
+- (#1926) Fix `parseLatex`, which should return `undefined` when parsing fails.
+- (#1927) Scan for already used environments for intellisense.
+- (#1928) Watch external pdf for automatic reload.
+- (#1932) Remove the `-cd` option of `latexmk`.
+- (#1933) Add an option to disable the progress bar of the compilation of LaTeX `progress.enabled`.
+- (#1943) Do not call `document.save()` in formatter.
+
+## [8.7.1] - 2020-01-31
+
+### Fixed
+- (#1924) Try magic and active document before current root.
+
+## [8.7.0] - 2020-01-30
+
+### Added
+- (#1913) Add recipe for rwn files.
+- (#1914) Add option to highlight or comment out duplicate entries in BibTeX.
+- (#1918) Declare `\Sexpr` syntax
+
+### Fixed
+- Fix scanning of \def for autocompletion.
+- (#1876) First try current rootFile on editor change.
+- (#1895) Fix subfiles building with `latexmk`.
+- (#1895) Accept roofile without extension in subfiles.
+- (#1902) Do not change the left panel on active editor change when `view.autoFocus.enabled` is set to `false`.
+- (#1904) Always use '/' as path separator.
+- (#1905) Fix keybinding regression for `ctrl+alt+[` and `+]`.
+- (#1911) `vscode.DocumentSymbol` expects non-empty label.
+- (#1915) Accept `@` in command names for intellisense.
+- (#1921) Trim current token for hover.
+
+## [8.6.0] - 2020-01-13
+
+### Added
+- (#1862) Syntax highlight for BibTeX style language (`.bst`).
+- (#1878) Add config to scan `label={...}`.
+- (#1891) Support asterisked sections in `shiftSectionLevel`.
+- (#1894) Declare `\bibentry` as a citation command.
+
+### Changed
+- (#1872) Refactoring communications between the WebSocket server and PDF viewers.
+- (#1874) Use typed proxies of workerpool.
+
+### Fixed
+- Fix double `/` in `latexindent -c` when using docker.
+- (#1871) Override the spread mode specified in PDF documents with the current.
+- (#1873) Do not use PWD entry as the cwd for fls files.
+- (#1873) Use `cross-spawn` to run `latexindent`.
+- (#1877) `\def` commands not passed to mathjax for preview.
+- (#1886) Send `type: 'loaded'` to the extension host when PDF files loaded.
+- (#1889) Fix outDir when containing `../`.
+- (#1890) `latex-workshop.latex.watch.files.ignore` not fully honored.
+- (#1899) Activate all keybindings for `rsweave` id.
+
 ## [8.5.0] - 2019-12-17
 
 ### Added

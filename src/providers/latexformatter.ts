@@ -1,11 +1,13 @@
 import * as vscode from 'vscode'
 import * as cp from 'child_process'
+import * as cs from 'cross-spawn'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 
 import { Extension } from '../main'
 import {Mutex} from '../lib/await-semaphore'
+import {replaceArgumentPlaceholders} from '../utils/utils'
 
 const fullRange = (doc: vscode.TextDocument) => doc.validateRange(new vscode.Range(0, 0, Number.MAX_VALUE, Number.MAX_VALUE))
 
@@ -108,7 +110,8 @@ export class LaTexFormatter {
 
     private format(document: vscode.TextDocument, range?: vscode.Range): Thenable<vscode.TextEdit[]> {
         return new Promise((resolve, _reject) => {
-            const configuration = vscode.workspace.getConfiguration('editor', document.uri)
+            const configuration = vscode.workspace.getConfiguration('latex-workshop')
+            const useDocker = configuration.get('docker.enabled') as boolean
 
             if (!vscode.window.activeTextEditor) {
                 return
@@ -127,21 +130,16 @@ export class LaTexFormatter {
             const temporaryFile = documentDirectory + path.sep + '__latexindent_temp.tex'
             fs.writeFileSync(temporaryFile, textToFormat)
 
-            const doc = document.fileName.replace(/\.tex$/, '').split(path.sep).join('/')
-            const docfile = path.basename(document.fileName, '.tex').split(path.sep).join('/')
             // generate command line arguments
-            const args = this.formatterArgs.map(arg => arg
-                // taken from ../components/builder.ts
-                .replace(/%DOC%/g, configuration.get('docker.enabled') ? docfile : doc)
-                .replace(/%DOCFILE%/g, docfile)
-                .replace(/%DIR%/g, path.dirname(document.fileName).split(path.sep).join('/'))
+            const args = this.formatterArgs.map(arg => { return replaceArgumentPlaceholders(document.fileName, this.extension.builder.tmpDir)(arg)
                 // latexformatter.ts specific tokens
-                .replace(/%TMPFILE%/g, temporaryFile.split(path.sep).join('/'))
-                .replace(/%INDENT%/g, indent))
+                .replace(/%TMPFILE%/g, useDocker ? path.basename(temporaryFile) : temporaryFile.split(path.sep).join('/'))
+                .replace(/%INDENT%/g, indent)
+            })
 
             this.extension.logger.addLogMessage(`Formatting with command ${this.formatter} ${args}`)
             this.extension.manager.setEnvVar()
-            const worker = cp.spawn(this.formatter, args, { stdio: 'pipe', cwd: path.dirname(document.fileName) })
+            const worker = cs.spawn(this.formatter, args, { stdio: 'pipe', cwd: path.dirname(document.fileName) })
             // handle stdout/stderr
             const stdoutBuffer: string[] = []
             const stderrBuffer: string[] = []
@@ -187,17 +185,12 @@ export class LatexFormatterProvider implements vscode.DocumentFormattingEditProv
         this.formatter = new LaTexFormatter(extension)
     }
 
-    public provideDocumentFormattingEdits(document: vscode.TextDocument, _options: vscode.FormattingOptions, _token: vscode.CancellationToken):
-        vscode.ProviderResult<vscode.TextEdit[]> {
-        return document.save().then(() => {
-            return this.formatter.formatDocument(document)
-        })
+    public provideDocumentFormattingEdits(document: vscode.TextDocument, _options: vscode.FormattingOptions, _token: vscode.CancellationToken): vscode.ProviderResult<vscode.TextEdit[]> {
+        return this.formatter.formatDocument(document)
     }
 
     public provideDocumentRangeFormattingEdits(document: vscode.TextDocument, range: vscode.Range, _options: vscode.FormattingOptions, _token: vscode.CancellationToken): vscode.ProviderResult<vscode.TextEdit[]> {
-        return document.save().then(() => {
-            return this.formatter.formatDocument(document, range)
-        })
+        return this.formatter.formatDocument(document, range)
     }
 
 }

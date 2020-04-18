@@ -9,6 +9,8 @@
 [![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/James-Yu/LaTeX-Workshop.svg)](https://github.com/James-Yu/LaTeX-Workshop/issues)
 [![Percentage of issues still open](https://isitmaintained.com/badge/open/James-Yu/LaTeX-Workshop.svg)](https://github.com/James-Yu/LaTeX-Workshop/issues)
 
+[![TeX Live on Windows](https://img.shields.io/github/workflow/status/James-Yu/LaTeX-Workshop/TeX%20Live%20on%20Windows.svg?logo=github)](https://github.com/James-Yu/LaTeX-Workshop/actions?query=workflow%3A%22TeX+Live+on+Windows%22) [![TeX Live on macOS](https://img.shields.io/github/workflow/status/James-Yu/LaTeX-Workshop/TeX%20Live%20on%20macOS.svg?logo=github)](https://github.com/James-Yu/LaTeX-Workshop/actions?query=workflow%3A%22TeX+Live+on+macOS%22) [![TeX Live on Linux](https://img.shields.io/github/workflow/status/James-Yu/LaTeX-Workshop/TeX%20Live%20on%20Linux.svg?logo=github)](https://github.com/James-Yu/LaTeX-Workshop/actions?query=workflow%3A%22TeX+Live+on+Linux%22) [![Docker on Linux](https://img.shields.io/github/workflow/status/James-Yu/LaTeX-Workshop/Docker%20on%20Linux.svg?logo=github)](https://github.com/James-Yu/LaTeX-Workshop/actions?query=workflow%3A%22Docker+on+Linux%22)
+
 LaTeX Workshop is an extension for [Visual Studio Code](https://code.visualstudio.com/), aiming to provide core features for LaTeX typesetting with Visual Studio Code. It also has a sibling extension, [LaTeX Utilities](https://marketplace.visualstudio.com/items?itemName=tecosaur.latex-utilities), providing extra features.
 
 This project won't be successful without contributions from the community, especially the current and past key contributors:
@@ -30,6 +32,7 @@ The manual of the extension is maintained as a [wiki](https://github.com/James-Y
   - [Requirements](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#requirements)
   - [Installation](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#installation)
   - [Setting PATH environment variable](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#setting-path-environment-variable)
+  - [Settings](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#settings)
   - [Usage](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#usage)
   - [Using Docker](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#using-docker)
   - [Using WSL](https://github.com/James-Yu/LaTeX-Workshop/wiki/Install#using-wsl)

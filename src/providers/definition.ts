@@ -13,14 +13,19 @@ export class DefinitionProvider implements vscode.DefinitionProvider {
         this.extension = extension
     }
 
-    private onAFilename(document: vscode.TextDocument, position: vscode.Position, token: string): string|null {
+    private onAFilename(document: vscode.TextDocument, position: vscode.Position, token: string): string|undefined {
         const line = document.lineAt(position.line).text
         const escapedToken = utils.escapeRegExp(token)
         const regexInput = new RegExp(`\\\\(?:include|input|subfile)\\{${escapedToken}\\}`)
         const regexImport = new RegExp(`\\\\(?:sub)?(?:import|includefrom|inputfrom)\\*?\\{([^\\}]*)\\}\\{${escapedToken}\\}`)
+        const regexDocumentclass = new RegExp(`\\\\(?:documentclass)(?:\\[[^[]]*\\])?\\{${escapedToken}\\}`)
 
         if (! vscode.window.activeTextEditor) {
-            return null
+            return undefined
+        }
+
+        if (line.match(regexDocumentclass)) {
+            return utils.resolveFile([path.dirname(vscode.window.activeTextEditor.document.fileName)], token, '.cls')
         }
 
         let dirs: string[] = []
@@ -39,7 +44,7 @@ export class DefinitionProvider implements vscode.DefinitionProvider {
         if (dirs.length > 0) {
             return utils.resolveFile(dirs, token, '.tex')
         }
-        return null
+        return undefined
     }
 
 

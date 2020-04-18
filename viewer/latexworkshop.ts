@@ -47,15 +47,21 @@ class LateXWorkshopPdfViewer implements ILatexWorkshopPdfViewer {
             PDFViewerApplication.isViewerEmbedded = false
         })
 
-        this.onDidStartPdfViewer(() => {
+        this.onDidStartPdfViewer( () => {
+            utils.callCbOnDidOpenWebSocket(this.socket, () => {
+                this.send({type:'request_params', path:this.pdfFilePath})
+            })
+        })
+        this.onDidRenderPdfFile( () => {
             utils.callCbOnDidOpenWebSocket(this.socket, () => {
                 this.send({type:'loaded', path:this.pdfFilePath})
             })
-        })
+        }, {once: true})
 
         this.hidePrintButton()
         this.registerKeybinding()
         this.startConnectionKeeper()
+        this.startRebroadcastingKeyboardEvent()
     }
 
     onWillStartPdfViewer(cb: (e: Event) => any): IDisposable {
@@ -145,6 +151,9 @@ class LateXWorkshopPdfViewer implements ILatexWorkshopPdfViewer {
                         document.getElementById('viewerContainer').scrollTop = pack.scrollTop
                         document.getElementById('viewerContainer').scrollLeft = pack.scrollLeft
                     }, {once: true})
+                    this.onDidRenderPdfFile( () => {
+                        this.send({type:'loaded', path:this.pdfFilePath})
+                    }, {once: true})
                     break
                 }
                 case 'params': {
@@ -181,6 +190,14 @@ class LateXWorkshopPdfViewer implements ILatexWorkshopPdfViewer {
                         this.synctex.reverseSynctexKeybinding = data.keybindings['synctex']
                         this.synctex.registerListenerOnEachPage()
                     }
+                    break
+                }
+                case 'request_status': {
+                    this.send( {
+                        type: 'status',
+                        path: this.pdfFilePath,
+                        scrollTop: document.getElementById('viewerContainer').scrollTop
+                    })
                     break
                 }
                 default: {
@@ -302,6 +319,31 @@ class LateXWorkshopPdfViewer implements ILatexWorkshopPdfViewer {
         }, 30000)
     }
 
+    // To enable keyboard shortcuts of VS Code when the iframe is focused,
+    // we have to dispatch keyboard events in the parent window.
+    // See https://github.com/microsoft/vscode/issues/65452#issuecomment-586036474
+    startRebroadcastingKeyboardEvent() {
+        if (!this.embedded) {
+            return
+        }
+        document.addEventListener('keydown', e => {
+            const obj = {
+                altKey: e.altKey,
+                code: e.code,
+                ctrlKey: e.ctrlKey,
+                isComposing: e.isComposing,
+                key: e.key,
+                location: e.location,
+                metaKey: e.metaKey,
+                repeat: e.repeat,
+                shiftKey: e.shiftKey
+            }
+            if (utils.isPdfjsShortcut(obj)) {
+                return
+            }
+            window.parent.postMessage(obj, '*')
+        })
+    }
 }
 
 new LateXWorkshopPdfViewer()

@@ -1,13 +1,14 @@
 # Contributing to LaTeX-Workshop
 
-## Quickstart (mac/linux)
+## Quickstart
 
 ```bash
 git clone https://github.com/James-Yu/LaTeX-Workshop.git
 cd ./LaTeX-Workshop
 npm install --no-optional
-command code .
+code -n .
 ```
+
 Press <kbd>F5</kbd> in vscode to start the development version in debug mode.
 
 ## Prerequisites for building the extension
@@ -37,6 +38,14 @@ To compile, run
 To build a release image, run
 
     npm run release
+
+To run tests, run
+
+    npm run test
+
+To run a specific test, run
+
+    npm run test build/fixture001
 
 ## Testing and debugging the extension
 
